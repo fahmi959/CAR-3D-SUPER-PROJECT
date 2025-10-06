@@ -26,6 +26,7 @@ export default function AudioManager({ velocityRef }) {
     };
 
     window.addEventListener("click", startAudio);
+    window.addEventListener("touchstart", startAudio, { once: true });
 
     return () => {
       engineRef.current?.pause();
