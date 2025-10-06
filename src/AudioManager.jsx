@@ -8,11 +8,11 @@ export default function AudioManager({ velocityRef }) {
 
   useEffect(() => {
     // Inisialisasi audio
-    engineRef.current = new Audio("/sounds/engine.mp3");
+    engineRef.current = new Audio(process.env.PUBLIC_URL + "/sounds/engine.mp3");
     engineRef.current.loop = true;
     engineRef.current.volume = 0.5;
 
-    bgmRef.current = new Audio("/sounds/bgm.mp3");
+    bgmRef.current = new Audio(process.env.PUBLIC_URL + "/sounds/bgm.mp3");
     bgmRef.current.loop = true;
     bgmRef.current.volume = 0.3;
 
