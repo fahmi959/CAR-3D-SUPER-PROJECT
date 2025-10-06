@@ -8,16 +8,13 @@ export function Scene({ touchControls }) {
   const [thirdPerson, setThirdPerson] = useState(false);
   const [cameraPosition, setCameraPosition] = useState([-6, 3.9, 6.21]);
 
+  // Set kamera berdasarkan touchControls.camera
   useEffect(() => {
-    function keydownHandler(e) {
-      if (e.key === "k") {
-        if(thirdPerson) setCameraPosition([-6, 3.9, 6.21 + Math.random() * 0.01]);
-        setThirdPerson(!thirdPerson); 
-      }
+    if (touchControls.camera) {
+      if (thirdPerson) setCameraPosition([-6, 3.9, 6.21 + Math.random() * 0.01]);
+      setThirdPerson(prev => !prev);
     }
-    window.addEventListener("keydown", keydownHandler);
-    return () => window.removeEventListener("keydown", keydownHandler);
-  }, [thirdPerson]);
+  }, [touchControls.camera]); // <-- dependency touchControls.camera
 
   return (
     <Suspense fallback={null}>
@@ -33,3 +30,4 @@ export function Scene({ touchControls }) {
     </Suspense>
   );
 }
+
