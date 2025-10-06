@@ -16,6 +16,8 @@
     "three": "0.145.0",
     "web-vitals": "^2.1.4"
   },
+  "homepage": "https://fahmi959.github.io/CAR-3D-SUPER-PROJECT",
+  
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
