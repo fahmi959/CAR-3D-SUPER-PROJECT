@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""
+power_watcher_no_admin_autocreate.py
+
+- Pantau Firebase Realtime DB via REST API (tanpa service account)
+- Saat start: pastikan node `power` ada (otomatis buat entry default dari TARGETS)
+- Saat start: set power/<LOCAL_HOSTNAME> = true
+- Poll DB, jika value True -> send WOL (ke MAC mapping)
+- Jika value False dan key == LOCAL_HOSTNAME -> shutdown local
+
+Requirements:
+  pip install wakeonlan requests
+Usage:
+  - Pastikan Firebase Realtime DB rules sudah sesuai (read/write true) jika tanpa auth
+  - Sesuaikan DATABASE_URL dan TARGETS
+  - Jalankan di mesin master
+"""
+
+import os
+import time
+import logging
+import platform
+import requests
+from wakeonlan import send_magic_packet
+
+# ---------------- CONFIG ----------------
+# Masukkan URL Realtime DB-mu (boleh regional). contoh:
+# https://power-pc-man4-default-rtdb.asia-southeast1.firebasedatabase.app
+DATABASE_URL = "https://power-pc-man4-64b22-default-rtdb.asia-southeast1.firebasedatabase.app/"
+
+# Nama node di database yang dipantau
+DB_NODE = "power"
+
+# Mapping nama-target -> info MAC & broadcast
+# Pastikan nama key (dict key) sama dengan nama yang kamu pakai di Firebase
+TARGETS = {
+    # contoh: gunakan hostname atau nama logis; kalau ini master, masukkan juga entry
+    "DESKTOP-UH5P3A3":       {"mac": "04:42:1A:2D:B6:7A", "broadcast": "192.168.100.255"},
+    "pc_target":       {"mac": "04:42:1A:2D:B6:7A", "broadcast": "192.168.100.255"},
+    "DESKTOP-NBIBKJ7": {"mac": "A8:A1:59:62:3F:B9", "broadcast": "192.168.100.255"},
+
+
+}
+
+# Interval polling (detik)
+POLL_INTERVAL = 5
+
+# Log file (atau None untuk cuma console)
+LOG_FILE = None
+
+# ----------------------------------------
+
+# Setup logging
+log_handlers = [logging.StreamHandler()]
+if LOG_FILE:
+    log_handlers.append(logging.FileHandler(LOG_FILE))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=log_handlers,
+)
+
+LOCAL_HOSTNAME = platform.node()
+
+# helper: sanitize DB url (hilangkan trailing slash)
+DATABASE_URL = DATABASE_URL.rstrip('/')
+
+def http_get(path):
+    url = f"{DATABASE_URL}/{path}.json"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+def http_put(path, payload):
+    url = f"{DATABASE_URL}/{path}.json"
+    resp = requests.put(url, json=payload, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+def http_patch(path, payload):
+    url = f"{DATABASE_URL}/{path}.json"
+    resp = requests.patch(url, json=payload, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+def ensure_power_node_and_defaults():
+    """
+    Jika node /power tidak ada, buat default berdasarkan TARGETS.
+    Pastikan local host diset True (menandakan agent online).
+    """
+    try:
+        data = http_get(DB_NODE)
+        if data is None:
+            # buat default: semua False kecuali LOCAL_HOSTNAME True
+            default = {}
+            for name in TARGETS.keys():
+                default[name] = False
+            # jika LOCAL_HOSTNAME belum ada di TARGETS, tambahkan entri default
+            if LOCAL_HOSTNAME not in default:
+                default[LOCAL_HOSTNAME] = False
+            # set local true
+            default[LOCAL_HOSTNAME] = True
+            http_put(DB_NODE, default)
+            logging.info("Created default /%s in Firebase: %s", DB_NODE, default)
+            return default
+        else:
+            # kalau ada, pastikan local key ada; jika tidak ada, set local True
+            if LOCAL_HOSTNAME not in data:
+                http_patch(DB_NODE, {LOCAL_HOSTNAME: True})
+                logging.info("Added %s=True to existing /%s", LOCAL_HOSTNAME, DB_NODE)
+                data[LOCAL_HOSTNAME] = True
+            else:
+                # jika ada tapi nilainya bukan True (misalnya False), set True karena agent online
+                if data.get(LOCAL_HOSTNAME) is not True:
+                    http_patch(DB_NODE, {LOCAL_HOSTNAME: True})
+                    logging.info("Set %s=True in /%s (agent started)", LOCAL_HOSTNAME, DB_NODE)
+                    data[LOCAL_HOSTNAME] = True
+            return data
+    except Exception as e:
+        logging.exception("Failed to ensure power node/defaults: %s", e)
+        return {}
+
+def get_power_state():
+    try:
+        data = http_get(DB_NODE)
+        return data or {}
+    except Exception as e:
+        logging.error("Gagal ambil data Firebase: %s", e)
+        return {}
+
+def send_wol_to(mac, broadcast_ip=None):
+    if not mac:
+        logging.warning("MAC address kosong, skip WOL")
+        return
+    try:
+        if broadcast_ip:
+            send_magic_packet(mac, ip_address=broadcast_ip)
+        else:
+            send_magic_packet(mac)
+        logging.info("Sent WOL to %s (broadcast %s)", mac, broadcast_ip)
+    except Exception as e:
+        logging.exception("Failed to send WOL to %s: %s", mac, e)
+
+def shutdown_local(delay=5):
+    logging.info("Shutting down local machine in %s seconds...", delay)
+    try:
+        if os.name == "nt":
+            os.system(f"shutdown /s /t {int(delay)}")
+        else:
+            os.system("sudo shutdown -h now")
+    except Exception as e:
+        logging.exception("Shutdown command failed: %s", e)
+
+def main_loop():
+    # pastikan node dan default ada, serta local set true
+    ensure_power_node_and_defaults()
+
+    prev_state = {}
+    logging.info("Start watching Firebase node '%s' as host '%s'", DB_NODE, LOCAL_HOSTNAME)
+
+    while True:
+        data = get_power_state()
+        if not isinstance(data, dict):
+            logging.warning("Unexpected DB data type: %s", type(data))
+            time.sleep(POLL_INTERVAL)
+            continue
+
+        for name, value in data.items():
+            prev = prev_state.get(name)
+            if value != prev:
+                logging.info("State change detected: %s : %s -> %s", name, prev, value)
+
+                # value truthy => kirim WOL (jika target punya MAC)
+                if value is True or value == "true" or value == 1:
+                    tgt = TARGETS.get(name)
+                    if tgt:
+                        send_wol_to(tgt.get("mac"), tgt.get("broadcast"))
+                    else:
+                        logging.warning("No TARGET mapping for '%s' -> skip WOL", name)
+
+                # value falsy => jika nama sama dengan local -> shutdown local
+                elif value is False or value == "false" or value == 0:
+                    if name.lower() == LOCAL_HOSTNAME.lower():
+                        logging.info("Firebase requested shutdown for this host (%s).", LOCAL_HOSTNAME)
+                        # set db state to False remains; shutdown
+                        shutdown_local(delay=5)
+                    else:
+                        logging.info("Received False for %s — not shutting remote hosts from master (no agent).", name)
+
+                else:
+                    logging.info("Unsupported value type for %s: %s", name, type(value))
+
+                prev_state[name] = value
+
+        time.sleep(POLL_INTERVAL)
+
+
+if __name__ == "__main__":
+    try:
+        main_loop()
+    except KeyboardInterrupt:
+        logging.info("Interrupted by user, exiting.")
+    except Exception:
+        logging.exception("Fatal error, exiting.")
+        raise
